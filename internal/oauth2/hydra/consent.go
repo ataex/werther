@@ -19,7 +19,7 @@ type ConsentReqDoer struct {
 	hydraURL string
 }
 
-// NewConsentRequest creates a ConsentRequest.
+// NewConsentReqDoer creates a ConsentRequest.
 func NewConsentReqDoer(hydraURL string) *ConsentReqDoer {
 	return &ConsentReqDoer{hydraURL: hydraURL}
 }
@@ -30,7 +30,7 @@ func (crd *ConsentReqDoer) InitiateRequest(challenge string) (*oauth2.ReqInfo, e
 	return ri, errors.Wrap(err, "failed to initiate consent request")
 }
 
-// Accept accepts the requested authentication process, and returns redirect URI.
+// AcceptConsentRequest accepts the requested authentication process, and returns redirect URI.
 func (crd *ConsentReqDoer) AcceptConsentRequest(challenge string, remember bool, rememberFor int, grantScope []string, idToken interface{}) (string, error) {
 	type session struct {
 		IDToken interface{} `json:"id_token,omitempty"`

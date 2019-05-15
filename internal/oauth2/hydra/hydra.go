@@ -25,10 +25,11 @@ type reqType string
 const (
 	login   reqType = "login"
 	consent reqType = "consent"
+	logout  reqType = "logout"
 )
 
 func initiateRequest(typ reqType, hydraURL, challenge string) (*oauth2.ReqInfo, error) {
-	ref, err := url.Parse(fmt.Sprintf("oauth2/auth/requests/%s/%s", string(typ), challenge))
+	ref, err := url.Parse(fmt.Sprintf("oauth2/auth/requests/%[1]s?%[1]s_challenge=%s", string(typ), challenge))
 	if err != nil {
 		return nil, err
 	}
@@ -54,6 +55,48 @@ func initiateRequest(typ reqType, hydraURL, challenge string) (*oauth2.ReqInfo, 
 		return nil, err
 	}
 	return &ri, nil
+}
+
+func acceptRequest(typ reqType, hydraURL, challenge string, data interface{}) (string, error) {
+	ref, err := url.Parse(fmt.Sprintf("oauth2/auth/requests/%[1]s/accept?%[1]s_challenge=%s", string(typ), challenge))
+	if err != nil {
+		return "", err
+	}
+	u, err := parseURL(hydraURL)
+	if err != nil {
+		return "", err
+	}
+	u = u.ResolveReference(ref)
+
+	var body []byte
+	if data != nil {
+		if body, err = json.Marshal(data); err != nil {
+			return "", err
+		}
+	}
+
+	r, err := http.NewRequest(http.MethodPut, u.String(), bytes.NewBuffer(body))
+	if err != nil {
+		return "", err
+	}
+	r.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(r)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if err := checkResponse(resp); err != nil {
+		return "", err
+	}
+	type result struct {
+		RedirectTo string `json:"redirect_to"`
+	}
+	var rs result
+	dec := json.NewDecoder(resp.Body)
+	if err := dec.Decode(&rs); err != nil {
+		return "", err
+	}
+	return rs.RedirectTo, nil
 }
 
 func checkResponse(resp *http.Response) error {
@@ -82,46 +125,6 @@ func checkResponse(resp *http.Response) error {
 	default:
 		return fmt.Errorf("bad HTTP status code %d", resp.StatusCode)
 	}
-}
-
-func acceptRequest(typ reqType, hydraURL, challenge string, data interface{}) (string, error) {
-	ref, err := url.Parse(fmt.Sprintf("oauth2/auth/requests/%s/%s/accept", string(typ), challenge))
-	if err != nil {
-		return "", err
-	}
-	u, err := parseURL(hydraURL)
-	if err != nil {
-		return "", err
-	}
-	u = u.ResolveReference(ref)
-
-	body, err := json.Marshal(data)
-	if err != nil {
-		return "", err
-	}
-
-	r, err := http.NewRequest(http.MethodPut, u.String(), bytes.NewBuffer(body))
-	if err != nil {
-		return "", err
-	}
-	r.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(r)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if err := checkResponse(resp); err != nil {
-		return "", err
-	}
-	type result struct {
-		RedirectTo string `json:"redirect_to"`
-	}
-	var rs result
-	dec := json.NewDecoder(resp.Body)
-	if err := dec.Decode(&rs); err != nil {
-		return "", err
-	}
-	return rs.RedirectTo, nil
 }
 
 func parseURL(s string) (*url.URL, error) {

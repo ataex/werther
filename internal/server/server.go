@@ -99,6 +99,7 @@ func New(cnf Config, log *zap.Logger) (*Server, error) {
 	router.Handler(http.MethodGet, "/auth/login", srv.handleLoginStart(hydra.NewLoginReqDoer(cnf.HydraAdminURL)))
 	router.Handler(http.MethodPost, "/auth/login", srv.handleLoginEnd(hydra.NewLoginReqDoer(cnf.HydraAdminURL), ldap))
 	router.Handler(http.MethodGet, "/auth/consent", srv.handleConsent(hydra.NewConsentReqDoer(cnf.HydraAdminURL), ldap))
+	router.Handler(http.MethodGet, "/auth/logout", srv.handleLogout(hydra.NewLogoutReqDoer(cnf.HydraAdminURL)))
 
 	router.Handler(http.MethodGet, "/health/alive", srv.handleHealthAliveAndReady())
 	router.Handler(http.MethodGet, "/health/ready", srv.handleHealthAliveAndReady())
@@ -269,6 +270,26 @@ func (srv *Server) handleLoginEnd(ra oa2LoginReqAcceptor, auther authenticator) 
 	}
 }
 
+func (srv *Server) renderLoginTemplate(w http.ResponseWriter, data interface{}) error {
+	t, err := srv.webldr.loadTemplate("login.tmpl")
+	if err != nil {
+		return err
+	}
+	var (
+		buf bytes.Buffer
+		bw  = bufio.NewWriter(&buf)
+	)
+	if err := t.Execute(bw, data); err != nil {
+		return err
+	}
+	if err := bw.Flush(); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	buf.WriteTo(w)
+	return nil
+}
+
 // oa2ConsentReqAcceptor is an interface that is used for creating and accepting an OAuth2 consent request.
 //
 // InitiateRequest returns oauth2.ErrChallengeNotFound if the OAuth2 provider failed to find the challenge.
@@ -350,24 +371,50 @@ func (srv *Server) handleConsent(rproc oa2ConsentReqProcessor, cfinder oidcClaim
 	}
 }
 
-func (srv *Server) renderLoginTemplate(w http.ResponseWriter, data interface{}) error {
-	t, err := srv.webldr.loadTemplate("login.tmpl")
-	if err != nil {
-		return err
+// oa2LogoutReqProcessor is an interface that is used for creating and accepting an OAuth2 logout request.
+//
+// InitiateRequest returns oauth2.ErrChallengeNotFound if the OAuth2 provider failed to find the challenge.
+// InitiateRequest returns oauth2.ErrChallengeExpired if the OAuth2 provider processed the challenge previously.
+type oa2LogoutReqProcessor interface {
+	InitiateRequest(challenge string) (*oauth2.ReqInfo, error)
+	AcceptLogoutRequest(challenge string) (string, error)
+}
+
+func (srv *Server) handleLogout(rproc oa2LogoutReqProcessor) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log := logger.FromContext(r.Context())
+
+		challenge := r.URL.Query().Get("logout_challenge")
+		if challenge == "" {
+			log.Debug("No logout challenge that is needed by the OAuth2 provider")
+			http.Error(w, "No logout challenge", http.StatusBadRequest)
+			return
+		}
+
+		ri, err := rproc.InitiateRequest(challenge)
+		if err != nil {
+			log = log.With("challenge", challenge)
+			switch errors.Cause(err) {
+			case oauth2.ErrChallengeNotFound:
+				log.Debugw("Unknown logout challenge in the OAuth2 provider", "error", err)
+				http.Error(w, "Unknown logout challenge", http.StatusBadRequest)
+				return
+			}
+			log.Infow("Failed to send an OAuth2 logout request", "error", err)
+			http.Error(w, internalServerErrorMessage, http.StatusInternalServerError)
+			return
+		}
+		log.Infow("A logout request is initiated", "challenge", challenge, "username", ri.Subject)
+
+		redirectTo, err := rproc.AcceptLogoutRequest(challenge)
+		if err != nil {
+			log.Infow("Failed to accept the logout request to the OAuth2 provider", "error", err)
+			http.Error(w, internalServerErrorMessage, http.StatusInternalServerError)
+			return
+		}
+		log.Debugw("Accepted the logout request to the OAuth2 provider")
+		http.Redirect(w, r, redirectTo, http.StatusFound)
 	}
-	var (
-		buf bytes.Buffer
-		bw  = bufio.NewWriter(&buf)
-	)
-	if err := t.Execute(bw, data); err != nil {
-		return err
-	}
-	if err := bw.Flush(); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	buf.WriteTo(w)
-	return nil
 }
 
 func (srv *Server) handleHealthAliveAndReady() http.HandlerFunc {

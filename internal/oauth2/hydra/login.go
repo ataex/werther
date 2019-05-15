@@ -19,7 +19,7 @@ type LoginReqDoer struct {
 	hydraURL string
 }
 
-// NewLoginRequest creates a LoginRequest.
+// NewLoginReqDoer creates a LoginRequest.
 func NewLoginReqDoer(hydraURL string) *LoginReqDoer {
 	return &LoginReqDoer{hydraURL: hydraURL}
 }
@@ -30,7 +30,7 @@ func (lrd *LoginReqDoer) InitiateRequest(challenge string) (*oauth2.ReqInfo, err
 	return ri, errors.Wrap(err, "failed to initiate login request")
 }
 
-// Accept accepts the requested authentication process, and returns redirect URI.
+// AcceptLoginRequest accepts the requested authentication process, and returns redirect URI.
 func (lrd *LoginReqDoer) AcceptLoginRequest(challenge string, remember bool, rememberFor int, subject string) (string, error) {
 	data := struct {
 		Remember    bool   `json:"remember"`

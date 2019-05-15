@@ -11,6 +11,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
@@ -497,4 +498,98 @@ type testOIDCClaimsFinder struct {
 
 func (cf testOIDCClaimsFinder) FindOIDCClaims(ctx context.Context, username string) (map[string]interface{}, error) {
 	return cf.findFunc(ctx, username)
+}
+
+func TestHandleLogout(t *testing.T) {
+	testCases := []struct {
+		name       string
+		challenge  string
+		initErr    error
+		acceptErr  error
+		redirectTo string
+		wantStatus int
+		wantLoc    string
+	}{
+		{
+			name:       "no login challenge",
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "unknown challenge",
+			challenge:  "foo",
+			initErr:    oauth2.ErrChallengeNotFound,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "init logout request error",
+			challenge:  "foo",
+			initErr:    fmt.Errorf("init logout request error"),
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "accept logout request error",
+			challenge:  "foo",
+			acceptErr:  fmt.Errorf("accept logout request error"),
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "happy path",
+			challenge:  "foo",
+			redirectTo: "/redirect-to",
+			wantStatus: http.StatusFound,
+			wantLoc:    "/redirect-to",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			url := "/logout"
+			if tc.challenge != "" {
+				url += "?logout_challenge=" + tc.challenge
+			}
+			r, err := http.NewRequest("GET", url, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Host = "gopkg.example.org"
+			rr := httptest.NewRecorder()
+
+			rproc := &testLogoutReqProc{
+				initReqFunc: func(challenge string) (*oauth2.ReqInfo, error) {
+					if challenge != tc.challenge {
+						t.Errorf("wrong challenge while initiating the request: got %q; want %q", challenge, tc.challenge)
+					}
+					return &oauth2.ReqInfo{}, tc.initErr
+				},
+				acceptReqFunc: func(challenge string) (string, error) {
+					if challenge != tc.challenge {
+						t.Errorf("wrong challenge while accepting the request: got %q; want %q", challenge, tc.challenge)
+					}
+					return tc.redirectTo, tc.acceptErr
+				},
+			}
+			srv := &Server{}
+			handler := srv.handleLogout(rproc)
+			handler.ServeHTTP(rr, r)
+
+			if rr.Code != tc.wantStatus {
+				t.Errorf("wrong status code: got %v; want %v", rr.Code, tc.wantStatus)
+			}
+			if gotLoc := rr.Header().Get("Location"); gotLoc != tc.wantLoc {
+				t.Errorf("wrong location:\ngot  %q\nwant %q", gotLoc, tc.wantLoc)
+			}
+		})
+	}
+}
+
+type testLogoutReqProc struct {
+	initReqFunc   func(string) (*oauth2.ReqInfo, error)
+	acceptReqFunc func(string) (string, error)
+}
+
+func (p *testLogoutReqProc) InitiateRequest(challenge string) (*oauth2.ReqInfo, error) {
+	return p.initReqFunc(challenge)
+}
+
+func (p *testLogoutReqProc) AcceptLogoutRequest(challenge string) (string, error) {
+	return p.acceptReqFunc(challenge)
 }
