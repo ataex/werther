@@ -2,7 +2,7 @@
 
 # Werther
 
-Werther is a login provider for ORY Hydra that is an OAuth2 provider.
+Werther is an identity provider for ORY Hydra that is an OAuth2 provider.
 
 **Important!**
 **The current version is compatible with ORY Hydra v1.0.0-rc.12 or higher.**
@@ -68,8 +68,7 @@ Assume that your IP is set as $MY_HOST. The instruction will use 4444 TCP port f
 4. Run Werther:
     ```
     docker run --network hydra-net -d --restart always --name werther -p 3000:8080      \
-          -e WERTHER_LOG_FORMAT=console                                                 \
-          -e WERTHER_HYDRA_ADMIN_URL=http://hydra:4445                                  \
+          -e WERTHER_IDENTP_HYDRA_URL=http://hydra:4445                                  \
           -e WERTHER_LDAP_ENDPOINTS=icdc0.icore.local:389,icdc1.icore.local:389         \
           -e WERTHER_LDAP_BINDDN=<BINDDN>                                               \
           -e WERTHER_LDAP_BINDPW=<BINDDN_PASSWORD>                                      \
@@ -135,7 +134,7 @@ Assume that your IP is set as $MY_HOST. The instruction will use 4444 TCP port f
 
 10. Log a user out from a browser:
     ```
-    open "http://$MY_HOST:4444/oauth2/sessions/logout?id_token_hint=<id_token>&post_logout_redirect_uri=http://$MY_HOST:8080/post-logout-callback&state=87654321"
+    open http://$MY_HOST:4444/oauth2/sessions/logout?id_token_hint=<id_token>&post_logout_redirect_uri=http://$MY_HOST:8080/post-logout-callback&state=87654321
     ```
     After a successful logout, a user will be redirected to the page "http://$MY_HOST:8080/post-logout-callback?state=87654321".
 

@@ -3,11 +3,9 @@ Copyright (C) JSC iCore - All Rights Reserved
 
 Unauthorized copying of this file, via any medium is strictly prohibited
 Proprietary and confidential
-
-Written by Konstantin Lepa <klepa@i-core.ru>, December 2018
 */
 
-package server
+package identp
 
 import (
 	"context"
@@ -22,7 +20,7 @@ import (
 
 	"github.com/justinas/nosurf"
 	"github.com/pkg/errors"
-	"gopkg.i-core.ru/werther/internal/oauth2"
+	"gopkg.i-core.ru/werther/internal/hydra"
 )
 
 func TestHandleLoginStart(t *testing.T) {
@@ -48,7 +46,6 @@ func TestHandleLoginStart(t *testing.T) {
 			challenge:  "foo",
 			wantStatus: http.StatusOK,
 			wantBody: `
-				WebBasePath: ;
 				LoginURL: login?login_challenge=foo;
 				CSRFToken:  true;
 				Challenge: foo;
@@ -64,13 +61,13 @@ func TestHandleLoginStart(t *testing.T) {
 		{
 			name:        "unknown challenge",
 			challenge:   "foo",
-			wantInitErr: oauth2.ErrChallengeNotFound,
+			wantInitErr: hydra.ErrChallengeNotFound,
 			wantStatus:  http.StatusBadRequest,
 		},
 		{
 			name:        "used challenge",
 			challenge:   "foo",
-			wantInitErr: oauth2.ErrChallengeExpired,
+			wantInitErr: hydra.ErrChallengeExpired,
 			wantStatus:  http.StatusBadRequest,
 		},
 		{
@@ -100,53 +97,50 @@ func TestHandleLoginStart(t *testing.T) {
 			r.Host = "gopkg.example.org"
 			rr := httptest.NewRecorder()
 
-			ldr := &testLoginWeb{}
-			ldr.loadTmplFunc = func(name string) (*template.Template, error) {
-				if name != "login.tmpl" {
-					t.Fatalf("wrong template name: got %q; want \"login.tmpl\"", name)
-				}
+			tmplRenderer := &testTemplateRenderer{
+				renderTmplFunc: func(w http.ResponseWriter, name string, data interface{}) error {
+					if name != "login.tmpl" {
+						t.Fatalf("wrong template name: got %q; want \"login.tmpl\"", name)
+					}
 
-				const loginT = `
-					WebBasePath: {{ .WebBasePath }};
-					LoginURL: {{ .LoginURL }};
-					CSRFToken: {{ if .CSRFToken }} true {{- else -}} false {{- end }};
-					Challenge: {{ .Challenge }};
-				`
-				tmpl, err := template.New("login").Parse(loginT)
-				if err != nil {
-					t.Fatalf("failed to parse template: %s", err)
-				}
-				return tmpl, nil
+					const loginT = `
+						LoginURL: {{ .LoginURL }};
+						CSRFToken: {{ if .CSRFToken }} true {{- else -}} false {{- end }};
+						Challenge: {{ .Challenge }};
+					`
+					tmpl, err := template.New("login").Parse(loginT)
+					if err != nil {
+						t.Fatalf("failed to parse template: %s", err)
+					}
+					return tmpl.Execute(w, data)
+				},
 			}
-			srv := &Server{webldr: ldr}
-			rproc := testLoginReqProc{}
-			rproc.initReqFunc = func(challenge string) (*oauth2.ReqInfo, error) {
-				if challenge != tc.challenge {
-					t.Errorf("wrong challenge while initiating the request: got %q; want %q", challenge, tc.challenge)
-				}
-				return &oauth2.ReqInfo{
-					Challenge:       tc.challenge,
-					RequestedScopes: tc.scopes,
-					Skip:            tc.skip,
-					Subject:         tc.subject,
-				}, tc.wantInitErr
+			rproc := testLoginReqProc{
+				initReqFunc: func(challenge string) (*hydra.ReqInfo, error) {
+					if challenge != tc.challenge {
+						t.Errorf("wrong challenge while initiating the request: got %q; want %q", challenge, tc.challenge)
+					}
+					return &hydra.ReqInfo{
+						Challenge:       tc.challenge,
+						RequestedScopes: tc.scopes,
+						Skip:            tc.skip,
+						Subject:         tc.subject,
+					}, tc.wantInitErr
+				},
+				acceptReqFunc: func(challenge string, remember bool, subject string) (string, error) {
+					if challenge != tc.challenge {
+						t.Errorf("wrong challenge while accepting the request: got %q; want %q", challenge, tc.challenge)
+					}
+					if remember {
+						t.Error("unexpected enabled remember flag")
+					}
+					if subject != tc.subject {
+						t.Errorf("wrong subject while accepting the request: got %q; want %q", subject, tc.subject)
+					}
+					return tc.redirect, tc.wantAcceptErr
+				},
 			}
-			rproc.acceptReqFunc = func(challenge string, remember bool, rememberFor int, subject string) (string, error) {
-				if challenge != tc.challenge {
-					t.Errorf("wrong challenge while accepting the request: got %q; want %q", challenge, tc.challenge)
-				}
-				if remember {
-					t.Error("unexpected enabled remember flag")
-				}
-				if rememberFor > 0 {
-					t.Errorf("unexpected remember duration: got %d", rememberFor)
-				}
-				if subject != tc.subject {
-					t.Errorf("wrong subject while accepting the request: got %q; want %q", subject, tc.subject)
-				}
-				return tc.redirect, tc.wantAcceptErr
-			}
-			handler := nosurf.New(srv.handleLoginStart(rproc))
+			handler := nosurf.New(newLoginStartHandler(rproc, tmplRenderer))
 			handler.ExemptPath("/login")
 			handler.ServeHTTP(rr, r)
 
@@ -170,24 +164,16 @@ func noindent(s string) string {
 }
 
 type testLoginReqProc struct {
-	initReqFunc   func(string) (*oauth2.ReqInfo, error)
-	acceptReqFunc func(string, bool, int, string) (string, error)
+	initReqFunc   func(string) (*hydra.ReqInfo, error)
+	acceptReqFunc func(string, bool, string) (string, error)
 }
 
-func (lrp testLoginReqProc) InitiateRequest(challenge string) (*oauth2.ReqInfo, error) {
+func (lrp testLoginReqProc) InitiateRequest(challenge string) (*hydra.ReqInfo, error) {
 	return lrp.initReqFunc(challenge)
 }
 
-func (lrp testLoginReqProc) AcceptLoginRequest(challenge string, remember bool, rememberFor int, subject string) (string, error) {
-	return lrp.acceptReqFunc(challenge, remember, rememberFor, subject)
-}
-
-type testLoginWeb struct {
-	loadTmplFunc func(string) (*template.Template, error)
-}
-
-func (tl *testLoginWeb) loadTemplate(name string) (*template.Template, error) {
-	return tl.loadTmplFunc(name)
+func (lrp testLoginReqProc) AcceptLoginRequest(challenge string, remember bool, subject string) (string, error) {
+	return lrp.acceptReqFunc(challenge, remember, subject)
 }
 
 func TestHandleLoginEnd(t *testing.T) {
@@ -195,6 +181,7 @@ func TestHandleLoginEnd(t *testing.T) {
 		name          string
 		challenge     string
 		subject       string
+		webBasePath   string
 		redirect      string
 		wantStatus    int
 		wantAcceptErr error
@@ -220,11 +207,11 @@ func TestHandleLoginEnd(t *testing.T) {
 			name:        "auth unknown error",
 			challenge:   "foo",
 			subject:     "joe",
+			webBasePath: "testBasePath",
 			wantStatus:  http.StatusOK,
 			wantInvAuth: false,
 			wantAuthErr: errors.New("Unknown error"),
 			wantBody: `
-				WebBasePath: ;
 				LoginURL: /login;
 				CSRFToken: T;
 				Challenge: foo;
@@ -239,7 +226,6 @@ func TestHandleLoginEnd(t *testing.T) {
 			wantStatus:  http.StatusOK,
 			wantInvAuth: true,
 			wantBody: `
-				WebBasePath: ;
 				LoginURL: /login;
 				CSRFToken: T;
 				Challenge: foo;
@@ -254,7 +240,6 @@ func TestHandleLoginEnd(t *testing.T) {
 			wantStatus:    http.StatusOK,
 			wantAcceptErr: errors.New("accept error"),
 			wantBody: `
-				WebBasePath: ;
 				LoginURL: /login;
 				CSRFToken: T;
 				Challenge: foo;
@@ -278,56 +263,52 @@ func TestHandleLoginEnd(t *testing.T) {
 			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			rr := httptest.NewRecorder()
 
-			ldr := &testLoginWeb{}
-			ldr.loadTmplFunc = func(name string) (*template.Template, error) {
-				if name != "login.tmpl" {
-					t.Fatalf("wrong template name: got %q; want \"login.tmpl\"", name)
-				}
+			tmplRenderer := &testTemplateRenderer{
+				renderTmplFunc: func(w http.ResponseWriter, name string, data interface{}) error {
+					if name != "login.tmpl" {
+						t.Fatalf("wrong template name: got %q; want \"login.tmpl\"", name)
+					}
 
-				const loginT = `
-					WebBasePath: {{ .WebBasePath }};
-					LoginURL: {{ .LoginURL }};
-					CSRFToken: {{ if .CSRFToken -}} T {{- else -}} F {{- end }};
-					Challenge: {{ .Challenge }};
-					InvCreds: {{ if .IsInvalidCredentials -}} T {{- else -}} F {{- end }};
-					IsIntErr: {{ if .IsInternalError -}} T {{- else -}} F {{- end}};
-				`
-				tmpl, err := template.New("login").Parse(loginT)
-				if err != nil {
-					t.Fatalf("failed to parse template: %s", err)
-				}
-				return tmpl, nil
+					const loginT = `
+						LoginURL: {{ .LoginURL }};
+						CSRFToken: {{ if .CSRFToken -}} T {{- else -}} F {{- end }};
+						Challenge: {{ .Challenge }};
+						InvCreds: {{ if .IsInvalidCredentials -}} T {{- else -}} F {{- end }};
+						IsIntErr: {{ if .IsInternalError -}} T {{- else -}} F {{- end}};
+					`
+					tmpl, err := template.New("login").Parse(loginT)
+					if err != nil {
+						t.Fatalf("failed to parse template: %s", err)
+					}
+					return tmpl.Execute(w, data)
+				},
 			}
-			srv := &Server{
-				webldr: ldr,
+			rproc := testLoginReqProc{
+				acceptReqFunc: func(challenge string, remember bool, subject string) (string, error) {
+					if challenge != tc.challenge {
+						t.Errorf("wrong challenge while accepting the request: got %q; want %q", challenge, tc.challenge)
+					}
+					if remember {
+						t.Error("unexpected enabled remember flag")
+					}
+					if subject != tc.subject {
+						t.Errorf("wrong subject while accepting the request: got %q; want %q", subject, tc.subject)
+					}
+					return tc.redirect, tc.wantAcceptErr
+				},
 			}
-			rproc := testLoginReqProc{}
-			rproc.acceptReqFunc = func(challenge string, remember bool, rememberFor int, subject string) (string, error) {
-				if challenge != tc.challenge {
-					t.Errorf("wrong challenge while accepting the request: got %q; want %q", challenge, tc.challenge)
-				}
-				if remember {
-					t.Error("unexpected enabled remember flag")
-				}
-				if rememberFor > 0 {
-					t.Errorf("unexpected remember duration: got %d", rememberFor)
-				}
-				if subject != tc.subject {
-					t.Errorf("wrong subject while accepting the request: got %q; want %q", subject, tc.subject)
-				}
-				return tc.redirect, tc.wantAcceptErr
+			auther := testAuthenticator{
+				authnFunc: func(ctx context.Context, username, password string) (bool, error) {
+					if username == "" {
+						t.Error("unexpected empty username")
+					}
+					if password == "" {
+						t.Error("unexpected empty password")
+					}
+					return !tc.wantInvAuth, tc.wantAuthErr
+				},
 			}
-			auther := testAuthenticator{}
-			auther.authnFunc = func(ctx context.Context, username, password string) (bool, error) {
-				if username == "" {
-					t.Error("unexpected empty username")
-				}
-				if password == "" {
-					t.Error("unexpected empty password")
-				}
-				return !tc.wantInvAuth, tc.wantAuthErr
-			}
-			handler := nosurf.New(srv.handleLoginEnd(rproc, auther))
+			handler := nosurf.New(newLoginEndHandler(rproc, auther, tmplRenderer))
 			handler.ExemptPath("/login")
 			handler.ServeHTTP(rr, r)
 
@@ -343,6 +324,14 @@ func TestHandleLoginEnd(t *testing.T) {
 			}
 		})
 	}
+}
+
+type testTemplateRenderer struct {
+	renderTmplFunc func(w http.ResponseWriter, name string, data interface{}) error
+}
+
+func (tl *testTemplateRenderer) RenderTemplate(w http.ResponseWriter, name string, data interface{}) error {
+	return tl.renderTmplFunc(w, name, data)
 }
 
 type testAuthenticator struct {
@@ -376,13 +365,13 @@ func TestHandleConsent(t *testing.T) {
 		{
 			name:        "unknown challenge",
 			challenge:   "foo",
-			wantInitErr: oauth2.ErrChallengeNotFound,
+			wantInitErr: hydra.ErrChallengeNotFound,
 			wantStatus:  http.StatusBadRequest,
 		},
 		{
 			name:        "used challenge",
 			challenge:   "foo",
-			wantInitErr: oauth2.ErrChallengeExpired,
+			wantInitErr: hydra.ErrChallengeExpired,
 			wantStatus:  http.StatusBadRequest,
 		},
 		{
@@ -408,64 +397,49 @@ func TestHandleConsent(t *testing.T) {
 			r.Host = "gopkg.example.org"
 			rr := httptest.NewRecorder()
 
-			ldr := &testLoginWeb{}
-			ldr.loadTmplFunc = func(name string) (*template.Template, error) {
-				if name != "login.tmpl" {
-					t.Fatalf("wrong template name: got %q; want \"login.tmpl\"", name)
-				}
-
-				const loginT = ""
-				tmpl, err := template.New("login").Parse(loginT)
-				if err != nil {
-					t.Fatalf("failed to parse template: %s", err)
-				}
-				return tmpl, nil
-			}
-			srv := &Server{webldr: ldr}
-			rproc := testConsentReqProc{}
-			rproc.initReqFunc = func(challenge string) (*oauth2.ReqInfo, error) {
-				if challenge != tc.challenge {
-					t.Errorf("wrong challenge while initiating the request: got %q; want %q", challenge, tc.challenge)
-				}
-				return &oauth2.ReqInfo{
-					Challenge:       tc.challenge,
-					Subject:         tc.subject,
-					RequestedScopes: tc.scopes,
-				}, tc.wantInitErr
-			}
-			rproc.acceptReqFunc = func(challenge string, remember bool, rememberFor int, grantScope []string, idToken interface{}) (string, error) {
-				if challenge != tc.challenge {
-					t.Errorf("wrong challenge while accepting the request: got %q; want %q", challenge, tc.challenge)
-				}
-				if remember == tc.skip {
-					t.Error("unexpected enabled remember flag")
-				}
-				if rememberFor > 0 {
-					t.Errorf("unexpected remember duration: got %d", rememberFor)
-				}
-				if len(grantScope) != len(tc.scopes) {
-					t.Errorf("wrong granted scopes while accepting the request: got %q; want %q", grantScope, tc.scopes)
-				} else {
-					for i := range grantScope {
-						if grantScope[i] != tc.scopes[i] {
-							t.Errorf("wrong granted scopes while accepting the request: got %q; want %q", grantScope, tc.scopes)
-							break
+			rproc := testConsentReqProc{
+				initReqFunc: func(challenge string) (*hydra.ReqInfo, error) {
+					if challenge != tc.challenge {
+						t.Errorf("wrong challenge while initiating the request: got %q; want %q", challenge, tc.challenge)
+					}
+					return &hydra.ReqInfo{
+						Challenge:       tc.challenge,
+						Subject:         tc.subject,
+						RequestedScopes: tc.scopes,
+					}, tc.wantInitErr
+				},
+				acceptReqFunc: func(challenge string, remember bool, grantScope []string, idToken interface{}) (string, error) {
+					if challenge != tc.challenge {
+						t.Errorf("wrong challenge while accepting the request: got %q; want %q", challenge, tc.challenge)
+					}
+					if remember == tc.skip {
+						t.Error("unexpected enabled remember flag")
+					}
+					if len(grantScope) != len(tc.scopes) {
+						t.Errorf("wrong granted scopes while accepting the request: got %q; want %q", grantScope, tc.scopes)
+					} else {
+						for i := range grantScope {
+							if grantScope[i] != tc.scopes[i] {
+								t.Errorf("wrong granted scopes while accepting the request: got %q; want %q", grantScope, tc.scopes)
+								break
+							}
 						}
 					}
-				}
-				if !reflect.DeepEqual(idToken, tc.claims) {
-					t.Errorf("wrong an id token while accepting the request: got %q; want %q", idToken, tc.claims)
-				}
-				return tc.redirect, tc.wantAcceptErr
+					if !reflect.DeepEqual(idToken, tc.claims) {
+						t.Errorf("wrong an id token while accepting the request: got %q; want %q", idToken, tc.claims)
+					}
+					return tc.redirect, tc.wantAcceptErr
+				},
 			}
-			cfinder := testOIDCClaimsFinder{}
-			cfinder.findFunc = func(ctx context.Context, username string) (map[string]interface{}, error) {
-				if username == "" {
-					t.Error("unexpected empty username")
-				}
-				return tc.claims, tc.wantFindErr
+			cfinder := testOIDCClaimsFinder{
+				findFunc: func(ctx context.Context, username string) (map[string]interface{}, error) {
+					if username == "" {
+						t.Error("unexpected empty username")
+					}
+					return tc.claims, tc.wantFindErr
+				},
 			}
-			handler := nosurf.New(srv.handleConsent(rproc, cfinder))
+			handler := nosurf.New(newConsentHandler(rproc, cfinder, nil))
 			handler.ExemptPath("/consent")
 			handler.ServeHTTP(rr, r)
 
@@ -480,16 +454,16 @@ func TestHandleConsent(t *testing.T) {
 }
 
 type testConsentReqProc struct {
-	initReqFunc   func(string) (*oauth2.ReqInfo, error)
-	acceptReqFunc func(string, bool, int, []string, interface{}) (string, error)
+	initReqFunc   func(string) (*hydra.ReqInfo, error)
+	acceptReqFunc func(string, bool, []string, interface{}) (string, error)
 }
 
-func (crp testConsentReqProc) InitiateRequest(challenge string) (*oauth2.ReqInfo, error) {
+func (crp testConsentReqProc) InitiateRequest(challenge string) (*hydra.ReqInfo, error) {
 	return crp.initReqFunc(challenge)
 }
 
-func (crp testConsentReqProc) AcceptConsentRequest(challenge string, remember bool, rememberFor int, grantScope []string, idToken interface{}) (string, error) {
-	return crp.acceptReqFunc(challenge, remember, rememberFor, grantScope, idToken)
+func (crp testConsentReqProc) AcceptConsentRequest(challenge string, remember bool, grantScope []string, idToken interface{}) (string, error) {
+	return crp.acceptReqFunc(challenge, remember, grantScope, idToken)
 }
 
 type testOIDCClaimsFinder struct {
@@ -500,7 +474,7 @@ func (cf testOIDCClaimsFinder) FindOIDCClaims(ctx context.Context, username stri
 	return cf.findFunc(ctx, username)
 }
 
-func TestHandleLogout(t *testing.T) {
+func TestLogoutHandler(t *testing.T) {
 	testCases := []struct {
 		name       string
 		challenge  string
@@ -517,7 +491,7 @@ func TestHandleLogout(t *testing.T) {
 		{
 			name:       "unknown challenge",
 			challenge:  "foo",
-			initErr:    oauth2.ErrChallengeNotFound,
+			initErr:    hydra.ErrChallengeNotFound,
 			wantStatus: http.StatusBadRequest,
 		},
 		{
@@ -554,11 +528,11 @@ func TestHandleLogout(t *testing.T) {
 			rr := httptest.NewRecorder()
 
 			rproc := &testLogoutReqProc{
-				initReqFunc: func(challenge string) (*oauth2.ReqInfo, error) {
+				initReqFunc: func(challenge string) (*hydra.ReqInfo, error) {
 					if challenge != tc.challenge {
 						t.Errorf("wrong challenge while initiating the request: got %q; want %q", challenge, tc.challenge)
 					}
-					return &oauth2.ReqInfo{}, tc.initErr
+					return &hydra.ReqInfo{}, tc.initErr
 				},
 				acceptReqFunc: func(challenge string) (string, error) {
 					if challenge != tc.challenge {
@@ -567,8 +541,7 @@ func TestHandleLogout(t *testing.T) {
 					return tc.redirectTo, tc.acceptErr
 				},
 			}
-			srv := &Server{}
-			handler := srv.handleLogout(rproc)
+			handler := newLogoutHandler(rproc)
 			handler.ServeHTTP(rr, r)
 
 			if rr.Code != tc.wantStatus {
@@ -582,11 +555,11 @@ func TestHandleLogout(t *testing.T) {
 }
 
 type testLogoutReqProc struct {
-	initReqFunc   func(string) (*oauth2.ReqInfo, error)
+	initReqFunc   func(string) (*hydra.ReqInfo, error)
 	acceptReqFunc func(string) (string, error)
 }
 
-func (p *testLogoutReqProc) InitiateRequest(challenge string) (*oauth2.ReqInfo, error) {
+func (p *testLogoutReqProc) InitiateRequest(challenge string) (*hydra.ReqInfo, error) {
 	return p.initReqFunc(challenge)
 }
 

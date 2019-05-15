@@ -3,8 +3,6 @@ Copyright (C) JSC iCore - All Rights Reserved
 
 Unauthorized copying of this file, via any medium is strictly prohibited
 Proprietary and confidential
-
-Written by Konstantin Lepa <klepa@i-core.ru>, July 2018
 */
 
 package hydra
@@ -12,12 +10,20 @@ package hydra
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/url"
+)
 
-	"gopkg.i-core.ru/werther/internal/oauth2"
+var (
+	// ErrUnauthenticated is an error that happens when authentication is failed.
+	ErrUnauthenticated = errors.New("unauthenticated")
+	// ErrChallengeNotFound is an error that happens when an unknown challenge is used.
+	ErrChallengeNotFound = errors.New("challenge not found")
+	// ErrChallengeExpired is an error that happens when a challenge is already used.
+	ErrChallengeExpired = errors.New("challenge expired")
 )
 
 type reqType string
@@ -28,7 +34,15 @@ const (
 	logout  reqType = "logout"
 )
 
-func initiateRequest(typ reqType, hydraURL, challenge string) (*oauth2.ReqInfo, error) {
+// ReqInfo contains information on an ongoing login or consent request.
+type ReqInfo struct {
+	Challenge       string   `json:"challenge"`
+	RequestedScopes []string `json:"requested_scope"`
+	Skip            bool     `json:"skip"`
+	Subject         string   `json:"subject"`
+}
+
+func initiateRequest(typ reqType, hydraURL, challenge string) (*ReqInfo, error) {
 	ref, err := url.Parse(fmt.Sprintf("oauth2/auth/requests/%[1]s?%[1]s_challenge=%s", string(typ), challenge))
 	if err != nil {
 		return nil, err
@@ -50,7 +64,7 @@ func initiateRequest(typ reqType, hydraURL, challenge string) (*oauth2.ReqInfo, 
 	if err != nil {
 		return nil, err
 	}
-	var ri oauth2.ReqInfo
+	var ri ReqInfo
 	if err := json.Unmarshal(data, &ri); err != nil {
 		return nil, err
 	}
@@ -88,10 +102,9 @@ func acceptRequest(typ reqType, hydraURL, challenge string, data interface{}) (s
 	if err := checkResponse(resp); err != nil {
 		return "", err
 	}
-	type result struct {
+	var rs struct {
 		RedirectTo string `json:"redirect_to"`
 	}
-	var rs result
 	dec := json.NewDecoder(resp.Body)
 	if err := dec.Decode(&rs); err != nil {
 		return "", err
@@ -103,27 +116,26 @@ func checkResponse(resp *http.Response) error {
 	if resp.StatusCode >= 200 && resp.StatusCode <= 302 {
 		return nil
 	}
-	if resp.StatusCode == 404 {
-		return oauth2.ErrChallengeNotFound
-	}
-	data, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	type errorResult struct {
-		Message string `json:"error"`
-	}
-	var rs errorResult
-	if err := json.Unmarshal(data, &rs); err != nil {
-		return err
-	}
+
 	switch resp.StatusCode {
 	case 401:
-		return oauth2.ErrUnauthenticated
+		return ErrUnauthenticated
+	case 404:
+		return ErrChallengeNotFound
 	case 409:
-		return oauth2.ErrChallengeExpired
+		return ErrChallengeExpired
 	default:
-		return fmt.Errorf("bad HTTP status code %d", resp.StatusCode)
+		var rs struct {
+			Message string `json:"error"`
+		}
+		data, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(data, &rs); err != nil {
+			return err
+		}
+		return fmt.Errorf("bad HTTP status code %d with message %q", resp.StatusCode, rs.Message)
 	}
 }
 
