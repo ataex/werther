@@ -1,8 +1,8 @@
 /*
-Copyright (C) JSC iCore - All Rights Reserved
+Copyright (c) JSC iCore.
 
-Unauthorized copying of this file, via any medium is strictly prohibited
-Proprietary and confidential
+This source code is licensed under the MIT license found in the
+LICENSE file in the root directory of this source tree.
 */
 
 package identp
@@ -19,8 +19,8 @@ import (
 	"testing"
 
 	"github.com/justinas/nosurf"
+	"github.com/nikolaas/werther/internal/hydra"
 	"github.com/pkg/errors"
-	"gopkg.i-core.ru/werther/internal/hydra"
 )
 
 func TestHandleLoginStart(t *testing.T) {

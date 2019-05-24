@@ -1,8 +1,8 @@
 /*
-Copyright (C) JSC iCore - All Rights Reserved
+Copyright (c) JSC iCore.
 
-Unauthorized copying of this file, via any medium is strictly prohibited
-Proprietary and confidential
+This source code is licensed under the MIT license found in the
+LICENSE file in the root directory of this source tree.
 */
 
 package ldapclient
@@ -17,22 +17,22 @@ import (
 	"time"
 
 	"github.com/coocood/freecache"
+	"github.com/i-core/rlog"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
-	"gopkg.i-core.ru/logutil"
 	ldap "gopkg.in/ldap.v2"
 )
 
 // Config is a LDAP configuration.
 type Config struct {
 	Endpoints  []string          `envconfig:"endpoints" required:"true" desc:"a LDAP's server URLs as \"<address>:<port>\""`
-	BaseDN     string            `envconfig:"basedn" required:"true" desc:"a LDAP base DN for searching users"`
 	BindDN     string            `envconfig:"binddn" desc:"a LDAP bind DN"`
 	BindPass   string            `envconfig:"bindpw" json:"-" desc:"a LDAP bind password"`
+	BaseDN     string            `envconfig:"basedn" required:"true" desc:"a LDAP base DN for searching users"`
+	AttrClaims map[string]string `envconfig:"attr_claims" default:"name:name,sn:family_name,givenName:given_name,mail:email" desc:"a mapping of LDAP attributes to OpenID connect claims"`
 	RoleBaseDN string            `envconfig:"role_basedn" required:"true" desc:"a LDAP base DN for searching roles"`
-	RoleAttr   string            `envconfig:"role_attr" default:"description" desc:"a LDAP attribute for role's name"`
-	RoleClaim  string            `ignored:"true"` // is custom OIDC claim name for roles' list
-	AttrClaims map[string]string `envconfig:"attr_claims" default:"name:name,sn:family_name,givenName:given_name,mail:email" desc:"a mapping of LDAP attributes to OIDC claims"`
+	RoleAttr   string            `envconfig:"role_attr" default:"description" desc:"a LDAP group's attribute that contains a role's name"`
+	RoleClaim  string            `envconfig:"role_claim" default:"https://github.com/nikolaas/werther/claims/roles" desc:"a name of an OpenID Connect claim that contains user roles"`
 	CacheSize  int               `envconfig:"cache_size" default:"512" desc:"a user info cache's size in KiB"`
 	CacheTTL   time.Duration     `envconfig:"cache_ttl" default:"30m" desc:"a user info cache TTL"`
 }
@@ -45,9 +45,6 @@ type Client struct {
 
 // New creates a new LDAP client.
 func New(cnf Config) *Client {
-	if cnf.RoleClaim == "" {
-		cnf.RoleClaim = "http://i-core.ru/claims/roles"
-	}
 	return &Client{
 		Config: cnf,
 		cache:  freecache.NewCache(cnf.CacheSize * 1024),
@@ -89,7 +86,7 @@ func (cli *Client) Authenticate(ctx context.Context, username, password string) 
 
 	// Clear the claims' cache because of possible re-authentication. We don't want stale claims after re-login.
 	if ok := cli.cache.Del([]byte(username)); ok {
-		log := logutil.FromContext(ctx)
+		log := rlog.FromContext(ctx)
 		log.Debug("Cleared user's OIDC claims in the cache")
 	}
 
@@ -106,7 +103,7 @@ func (cli *Client) dialTCP(ctx context.Context) <-chan *ldap.Conn {
 		go func(addr string) {
 			defer wg.Done()
 
-			log := logutil.FromContext(ctx).Sugar()
+			log := rlog.FromContext(ctx).Sugar()
 
 			d := net.Dialer{Timeout: ldap.DefaultTimeout}
 			tcpcn, err := d.DialContext(ctx, "tcp", addr)
@@ -167,7 +164,7 @@ func (cli *Client) findBasicUserDetails(cn *ldap.Conn, username string, attrs []
 
 // FindOIDCClaims finds all OIDC claims for a user.
 func (cli *Client) FindOIDCClaims(ctx context.Context, username string) (map[string]interface{}, error) {
-	log := logutil.FromContext(ctx).Sugar()
+	log := rlog.FromContext(ctx).Sugar()
 
 	// Retrieving from LDAP is slow. So, we try to get claims for the given username from the cache.
 	switch cdata, err := cli.cache.Get([]byte(username)); err {
@@ -212,7 +209,7 @@ func (cli *Client) FindOIDCClaims(ctx context.Context, username string) (map[str
 	}
 	log.Infow("Retrieved user's info from LDAP", "details", details)
 
-	// Transform the retrived attributes to corresponding claims.
+	// Transform the retrieved attributes to corresponding claims.
 	claims := make(map[string]interface{})
 	for attr, v := range details {
 		if claim, ok := cli.AttrClaims[attr]; ok {
